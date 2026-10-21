@@ -1,0 +1,18 @@
+# UI (Qt 6.7+ for the Qt Quick Shapes curve renderer). Image conversions and
+# image actions use Qt's own image reader / writer: no Pillow needed.
+PyQt6>=6.7
+
+# Conversions. Only ever imported in the helper process, never by the UI.
+PyMuPDF>=1.26      # PDF -> TXT / JPG / PNG, image -> PDF, thumbnails, compress, metadata (AGPL)
+pdf2docx>=0.5.8    # PDF -> DOCX (pulls in OpenCV, numpy, fontTools, lxml)
+
+
+# Editor (its own process, started on demand): pixel math for color adjustments,
+# and the metadata viewer (tag names, IPTC, TIFF / GIF reading). Pillow is
+# never imported by the wheel itself.
+numpy>=1.24
+Pillow>=10
+
+# HEIC / HEIF (iPhone photos), read only: the decode-only build of libheif
+# (BSD-3 wrapper; libheif and libde265 are LGPL-3.0). Spindle never writes HEIC.
+pi-heif>=1.0

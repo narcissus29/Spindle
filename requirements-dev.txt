@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8
+# Tests only: writes the HEIC test photos (an encoder; never shipped).
+pillow-heif>=1.0

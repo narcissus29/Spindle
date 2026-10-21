@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Spindle
+Comment=Convert, compress and edit files from a radial wheel
+Exec=spindle
+Icon=spindle
+Terminal=false
+Categories=Utility;Graphics;Office;
+StartupWMClass=spindle

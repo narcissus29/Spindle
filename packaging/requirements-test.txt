@@ -1,0 +1,5 @@
+# Extra packages for the test suite (on top of requirements-build.txt).
+pytest==9.1.1
+pluggy==1.7.0
+iniconfig==2.3.1
+pillow-heif==1.8.1  # writes HEIC test photos (Spindle itself only reads them, with pi-heif)

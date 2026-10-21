@@ -1,0 +1,238 @@
+# Builds Spindle for Linux (AppImage) and Windows (installer), tests both
+# with the test suite (from source) and the app's own --selftest, and
+# reports sizes and memory.
+#
+# - Run by hand (Actions > Build > Run workflow): builds and tests, the files
+#   are attached to the run as artifacts. The reports are small artifacts of
+#   their own (reports-linux, reports-windows): download just those with
+#   `gh run download <run-id> -n reports-linux -n reports-windows`.
+# - Pushing a tag like v0.1.0: the same, then a DRAFT release with the two
+#   files under fixed names (Spindle-Setup.exe, Spindle-x86_64.AppImage).
+#   Publishing the draft makes these links work:
+#     https://github.com/<owner>/<repo>/releases/latest/download/Spindle-Setup.exe
+#     https://github.com/<owner>/<repo>/releases/latest/download/Spindle-x86_64.AppImage
+
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+# Least privilege: the build jobs run third-party code (pip packages,
+# Inno Setup) and only need to read the repo. Only the release job can
+# write (to create the draft release). Actions are pinned to commits.
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    # The oldest supported runner: an AppImage runs on systems at least as
+    # new as the one it was built on (glibc).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: System libraries Qt needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-image0 libxcb-shape0 libegl1 libopengl0 libdbus-1-3 libfontconfig1
+      - name: Python packages
+        run: pip install -r packaging/requirements-build.txt -r packaging/requirements-test.txt
+      # The regular packages: Ubuntu 22.04's -nogui Impress can't load any
+      # presentation ("Unspecified Application Error"), not even a .pptx.
+      - name: LibreOffice (the tests convert office documents with it)
+        run: |
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress
+          soffice --version
+      - name: Tests (from source)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          SPINDLE_REQUIRE_LIBREOFFICE: "1"
+        run: python -m pytest -q -p no:cacheprovider
+      - name: Build
+        run: python packaging/build.py
+      - name: Self-test (the AppImage itself)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          ./dist/Spindle-x86_64.AppImage --selftest | tee selftest-linux.txt
+          grep -q '"ok": true' selftest-linux.txt
+      - name: Sizes
+        run: |
+          echo "AppImage: $(stat -c %s dist/Spindle-x86_64.AppImage) bytes" | tee sizes-linux.txt
+          echo "Unpacked: $(du -sb build/dist/spindle | cut -f1) bytes" | tee -a sizes-linux.txt
+      # Reports apart from the big file: `gh run download <run> -n reports-linux`
+      # fetches a few KB instead of the whole AppImage.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: reports-linux
+          path: |
+            selftest-linux.txt
+            sizes-linux.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: linux
+          path: dist/Spindle-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Python packages
+        run: pip install -r packaging/requirements-build.txt -r packaging/requirements-test.txt
+      # The Windows-specific parts, for real: RegisterHotKey for the
+      # shortcut recorder, Task Scheduler for start at login, the log
+      # file, the helper failing, the single resident copy.
+      # No Microsoft Office on the runner: LibreOffice for Windows instead
+      # (Office itself is covered by tests with a stand-in for it).
+      - name: LibreOffice
+        shell: pwsh
+        run: choco install libreoffice-fresh -y --no-progress
+      - name: Tests (from source, Windows desktop integration)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          SPINDLE_REQUIRE_LIBREOFFICE: "1"
+        run: >
+          python -m pytest -q -p no:cacheprovider
+          tests/test_shortcut_recorder.py tests/test_startup.py tests/test_logs.py
+          tests/test_wheel_ui.py tests/test_registry.py tests/test_process_worker.py tests/test_runner.py
+          tests/test_office.py tests/test_combine.py tests/test_outputs_safety.py
+      - name: Build
+        run: python packaging/build.py
+      # As 0.1.0-rc3 (still called Satsuma) left it: program folder, Start
+      # Menu folder, uninstall entry (same AppId), settings, Run value.
+      - name: An old Satsuma install to replace
+        shell: pwsh
+        run: |
+          $old = "$env:LOCALAPPDATA\Programs\Satsuma"
+          New-Item -ItemType Directory -Force $old | Out-Null
+          Copy-Item "$env:WINDIR\System32\whoami.exe" "$old\Satsuma.exe"
+          Set-Content "$old\unins000.exe" "old"
+          $menu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Satsuma"
+          New-Item -ItemType Directory -Force $menu | Out-Null
+          Set-Content "$menu\Satsuma.lnk" "old"
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F0B9A52-4E0C-4D8B-9B37-5C1E2A7D3F10}_is1"
+          New-Item -Force $key | Out-Null
+          Set-ItemProperty $key DisplayName "Satsuma"
+          Set-ItemProperty $key "Inno Setup: App Path" $old
+          Set-ItemProperty $key InstallLocation "$old\"
+          Set-ItemProperty $key UninstallString "`"$old\unins000.exe`""
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\satsuma" | Out-Null
+          Set-Content "$env:LOCALAPPDATA\satsuma\config.json" '{"hotkey": "Ctrl+Alt+K", "setup_done": true, "theme": "orange"}'
+          New-Item -Force "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" | Out-Null
+          Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" Satsuma "`"$old\Satsuma.exe`""
+      - name: Install (silent, per user, as a user would get it)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\Spindle-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $app = "$env:LOCALAPPDATA\Programs\Spindle\Spindle.exe"
+          if (-not (Test-Path $app)) { throw "not installed: $app" }
+          $menu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Spindle"
+          Get-ChildItem $menu | Format-Table Name
+          # Satsuma is replaced: one entry in Settings > Apps, its folders gone
+          $entries = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
+            ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -match "Satsuma|Spindle" }
+          $entries | Format-Table DisplayName, InstallLocation
+          if (@($entries).Count -ne 1 -or $entries.DisplayName -ne "Spindle") { throw "expected one Spindle entry in Apps" }
+          if (Test-Path "$env:LOCALAPPDATA\Programs\Satsuma") { throw "Satsuma's program folder is still there" }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Satsuma") { throw "Satsuma's Start Menu folder is still there" }
+      - name: Self-test (the installed app)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = "$env:LOCALAPPDATA\Programs\Spindle\Spindle.exe"
+          $p = Start-Process $app -ArgumentList '--selftest' -RedirectStandardOutput selftest-windows.txt -RedirectStandardError selftest-windows-err.txt -Wait -PassThru
+          Get-Content selftest-windows.txt
+          if ($p.ExitCode -ne 0) { Get-Content selftest-windows-err.txt -Tail 40; throw "self-test exit code $($p.ExitCode)" }
+          if (-not (Select-String -Path selftest-windows.txt -Pattern '"ok": true' -Quiet)) { throw "self-test failed" }
+      - name: Start at login (the installed app with --background)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = "$env:LOCALAPPDATA\Programs\Spindle\Spindle.exe"
+          $log = "$env:LOCALAPPDATA\spindle\spindle.log"
+          Start-Process $app -ArgumentList '--background'
+          for ($i = 0; $i -lt 90; $i++) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern '\[startup\] ready' -Quiet)) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not (Select-String -Path $log -Pattern '\[startup\] ready' -Quiet)) { throw "no startup line in the log" }
+          # started again while running: exits at once, shows nothing
+          $p = Start-Process $app -ArgumentList '--background' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "second --background: exit code $($p.ExitCode)" }
+          Start-Process $app -ArgumentList '--quit' -Wait
+          Copy-Item $log startup-windows.log
+          Get-Content startup-windows.log
+          # the first start moved Satsuma over: settings kept, its leftovers gone
+          $cfg = Get-Content "$env:LOCALAPPDATA\spindle\config.json" | ConvertFrom-Json
+          if ($cfg.hotkey -ne "Ctrl+Alt+K" -or $cfg.theme -ne "orange") { throw "settings weren't moved over" }
+          if (Test-Path "$env:LOCALAPPDATA\satsuma") { throw "Satsuma's settings folder is still there" }
+          if ((Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run").PSObject.Properties.Name -contains "Satsuma") { throw "Satsuma's Run value is still there" }
+          schtasks /Query /TN "Spindle ($env:USERNAME)"
+          if ($LASTEXITCODE -ne 0) { throw "start at login wasn't taken over" }
+      - name: Sizes
+        shell: pwsh
+        run: |
+          $installed = (Get-ChildItem -Recurse -File "$env:LOCALAPPDATA\Programs\Spindle" | Measure-Object Length -Sum).Sum
+          "Installer: $((Get-Item dist\Spindle-Setup.exe).Length) bytes" | Tee-Object sizes-windows.txt
+          "Installed: $installed bytes" | Tee-Object -Append sizes-windows.txt
+      - name: Uninstall (silent)
+        shell: pwsh
+        run: |
+          $p = Start-Process "$env:LOCALAPPDATA\Programs\Spindle\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
+          Start-Sleep -Seconds 3
+          if (Test-Path "$env:LOCALAPPDATA\Programs\Spindle\Spindle.exe") { throw "still installed after uninstall" }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Spindle") { throw "Start Menu entry left behind" }
+          schtasks /Query /TN "Spindle ($env:USERNAME)" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "the logon task was left behind" }
+          $global:LASTEXITCODE = 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: reports-windows
+          path: |
+            selftest-windows*.txt
+            sizes-windows.txt
+            startup-windows.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: windows
+          path: dist/Spindle-Setup.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: linux
+          path: linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: windows
+          path: windows
+      - name: Draft release (publish it by hand)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Spindle ${GITHUB_REF_NAME#v}" --notes "Download Spindle for Windows or Linux below." \
+            windows/Spindle-Setup.exe linux/Spindle-x86_64.AppImage
