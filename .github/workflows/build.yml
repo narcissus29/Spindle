@@ -6,11 +6,15 @@
 #   are attached to the run as artifacts. The reports are small artifacts of
 #   their own (reports-linux, reports-windows): download just those with
 #   `gh run download <run-id> -n reports-linux -n reports-windows`.
-# - Pushing a tag like v0.1.0: the same, then a DRAFT release with the two
-#   files under fixed names (Spindle-Setup.exe, Spindle-x86_64.AppImage).
-#   Publishing the draft makes these links work:
-#     https://github.com/<owner>/<repo>/releases/latest/download/Spindle-Setup.exe
-#     https://github.com/<owner>/<repo>/releases/latest/download/Spindle-x86_64.AppImage
+# - Pushing a tag like v0.1.0: the same, then a release with the two files
+#   under fixed names (Spindle-Setup.exe, Spindle-x86_64.AppImage), shown as
+#   "Download for Windows" / "Download for Linux" (asset labels).
+#   - v0.1.0, v1.2.3 ...: a normal, published release, marked Latest, so
+#     these links always give the newest version:
+#       https://github.com/<owner>/<repo>/releases/latest/download/Spindle-Setup.exe
+#       https://github.com/<owner>/<repo>/releases/latest/download/Spindle-x86_64.AppImage
+#   - v0.2.0-rc1 (a tag with "-rc"): a DRAFT, for testing before release;
+#     only people with access to the repository see it.
 
 name: Build
 
@@ -21,7 +25,7 @@ on:
 
 # Least privilege: the build jobs run third-party code (pip packages,
 # Inno Setup) and only need to read the repo. Only the release job can
-# write (to create the draft release). Actions are pinned to commits.
+# write (to create the release). Actions are pinned to commits.
 permissions:
   contents: read
 
@@ -229,10 +233,19 @@ jobs:
         with:
           name: windows
           path: windows
-      - name: Draft release (publish it by hand)
+      # "file#label": the label is what the release page shows; the file
+      # name (and so every download link) stays the same.
+      - name: Release (a draft for -rc tags)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+          case "$GITHUB_REF_NAME" in
+            *-rc*) kind="--draft" ;;
+            *)     kind="--latest" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" $kind \
             --title "Spindle ${GITHUB_REF_NAME#v}" --notes "Download Spindle for Windows or Linux below." \
-            windows/Spindle-Setup.exe linux/Spindle-x86_64.AppImage
+            "windows/Spindle-Setup.exe#Download for Windows" \
+            "linux/Spindle-x86_64.AppImage#Download for Linux"
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,assets --jq '"draft=\(.isDraft) prerelease=\(.isPrerelease)", (.assets[] | "\(.name): \(.label)")'
